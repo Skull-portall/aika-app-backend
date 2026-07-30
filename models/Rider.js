@@ -25,6 +25,11 @@ const RiderSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    status: {
+      type: String,
+      enum: ["Online", "Offline", "Busy", "Archived"],
+      default: "Offline",
+    },
     rating: {
       type: Number,
       default: 4.9,
@@ -74,6 +79,15 @@ const RiderSchema = new mongoose.Schema(
     isVerified: {
       type: Boolean,
       default: false,
+    },
+    verificationStatus: {
+      type: String,
+      enum: ["Pending", "Approved", "Rejected"],
+      default: "Pending",
+    },
+    verificationReason: {
+      type: String,
+      default: "",
     },
   },
   {

@@ -12,6 +12,24 @@ const JobSchema = new mongoose.Schema(
       ref: "Rider",
       default: null,
     },
+    riderName: {
+      type: String,
+      default: "",
+    },
+    riderPhone: {
+      type: String,
+      default: "",
+    },
+    vendorPhone: {
+      type: String,
+      default: "",
+    },
+    vendorId: {
+
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Vendor",
+      default: null,
+    },
     vendor: {
       name: { type: String, required: true, default: "Hajiya's Kitchen" },
       address: { type: String, required: true, default: "Unguwan Rimi, Kaduna" },
@@ -32,6 +50,10 @@ const JobSchema = new mongoose.Schema(
       type: Number,
       default: 4500,
     },
+    amountFormatted: {
+      type: String,
+      default: "₦4,850",
+    },
     status: {
       type: String,
       enum: [
@@ -46,8 +68,35 @@ const JobSchema = new mongoose.Schema(
         "completed",
         "cancelled",
         "issue",
+        "Active",
+        "Completed",
+        "Failed",
       ],
       default: "available",
+    },
+    trackingCode: {
+      type: String,
+      default: "",
+    },
+    category: {
+      type: String,
+      default: "General Delivery",
+    },
+    packageSize: {
+      type: String,
+      default: "Small",
+    },
+    riderLat: {
+      type: Number,
+      default: null,
+    },
+    riderLng: {
+      type: Number,
+      default: null,
+    },
+    riderUpdatedAt: {
+      type: Date,
+      default: null,
     },
     proofPhotoUrl: {
       type: String,

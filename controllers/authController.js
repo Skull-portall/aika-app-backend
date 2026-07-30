@@ -23,6 +23,18 @@ const checkPhone = async (req, res, next) => {
     const cleanPhone = phone.replace(/\D/g, "");
     const riderExists = await Rider.findOne({ phone: cleanPhone });
 
+    // Archived accounts: block login AND new registration
+    // Only permanently deleted phones (not in DB at all) can register fresh
+    if (riderExists && riderExists.status === "Archived") {
+      return res.status(200).json({
+        phone: cleanPhone,
+        registered: false,
+        step: "otp",
+        blocked: true,
+        message: "This account has been deactivated by an administrator. Please contact support.",
+      });
+    }
+
     res.status(200).json({
       phone: cleanPhone,
       registered: !!riderExists && !!riderExists.password,
@@ -55,11 +67,18 @@ const verifyOTP = async (req, res, next) => {
       throw new Error("Invalid OTP verification code");
     }
 
-    // Find or create rider with this verified number
     let rider = await Rider.findOne({ phone: cleanPhone });
     let isNew = false;
 
+    // Archived accounts are completely blocked — cannot login or re-register
+    // Only permanently deleted phones (not in DB) can create a new account
+    if (rider && rider.status === "Archived") {
+      res.status(403);
+      throw new Error("This account has been deactivated by an administrator. You cannot sign up with this number. Please contact support.");
+    }
+
     if (!rider) {
+      // Phone not in DB at all (was permanently deleted or brand new) — create fresh account
       rider = await Rider.create({
         phone: cleanPhone,
         step: "personal-details",
@@ -101,6 +120,12 @@ const loginRider = async (req, res, next) => {
     if (!rider || !rider.password) {
       res.status(401);
       throw new Error("Invalid phone or password");
+    }
+
+    // Block archived (soft-deleted) or deactivated riders
+    if (rider.status === "Archived") {
+      res.status(403);
+      throw new Error("Your account has been deactivated by an administrator. Please contact support.");
     }
 
     const isMatch = await rider.matchPassword(password);
@@ -390,6 +415,8 @@ const getRiderStatus = async (req, res, next) => {
     res.status(200).json({
       step: rider.step,
       isVerified: rider.isVerified,
+      verificationStatus: rider.verificationStatus || (rider.isVerified ? "Approved" : rider.step === "rejected" ? "Rejected" : "Pending"),
+      verificationReason: rider.verificationReason || "",
       personalDetails: rider.personalDetails,
       identityVerification: rider.identityVerification,
       vehicleDetails: rider.vehicleDetails,

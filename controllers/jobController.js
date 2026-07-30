@@ -2,74 +2,43 @@ const Job = require("../models/Job");
 const Rider = require("../models/Rider");
 const Transaction = require("../models/Transaction");
 
-// Seed initial dispatches if database is empty
-const seedInitialJobs = async () => {
-  const count = await Job.countDocuments();
-  if (count === 0) {
-    await Job.create([
-      {
-        orderNumber: "AIKA-9823",
-        deliveryFee: 350,
-        codAmount: 4500,
-        status: "available",
-        vendor: {
-          name: "Hajiya's Kitchen",
-          address: "Unguwan Rimi, Kaduna",
-          itemsDescription: "1x Large Family Platter + 2 Drinks",
-          fragile: true,
-        },
-        customer: {
-          name: "Fatima Yusuf",
-          address: "No 12, Gwamma Road, Barnawa, Kaduna",
-          phone: "+2348031234567",
-        },
-      },
-      {
-        orderNumber: "AIKA-9812",
-        deliveryFee: 450,
-        codAmount: 3200,
-        status: "available",
-        vendor: {
-          name: "Mama Cass Restaurant",
-          address: "Ahmadu Bello Way, Kaduna",
-          itemsDescription: "2x Jollof Rice & Chicken Special",
-          fragile: false,
-        },
-        customer: {
-          name: "Ibrahim Danjuma",
-          address: "Kawo New Extension, Kaduna",
-          phone: "+2348029876543",
-        },
-      },
-      {
-        orderNumber: "AIKA-9799",
-        deliveryFee: 350,
-        codAmount: 1800,
-        status: "available",
-        vendor: {
-          name: "Arewa Fresh Bakes",
-          address: "Sabon Gari, Kaduna",
-          itemsDescription: "1x Box Assorted Meat Pies",
-          fragile: true,
-        },
-        customer: {
-          name: "Aisha Bello",
-          address: "Tudun Wada, Kaduna",
-          phone: "+2348051122334",
-        },
-      },
-    ]);
+// Use Render-hosted bot URL in production, localhost in dev
+const BOT_URL = process.env.BOT_URL || "http://localhost:3000";
+
+const notifyBotStatus = async (job, status, reason = "") => {
+  try {
+    const vendorPhone = job.vendorPhone || job.customer?.phone || "";
+    if (vendorPhone) {
+      await fetch(`${BOT_URL}/bot/notify-status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderNumber: job.orderNumber,
+          status: status || job.status,
+          riderName: job.riderName || "Assigned Rider",
+          riderPhone: job.riderPhone || "",
+          vendorPhone: vendorPhone,
+          reason: reason || job.issueReason || "",
+        }),
+      });
+      console.log(`Notified bot of status "${status}" for job "${job.orderNumber}"`);
+    }
+  } catch (err) {
+    console.warn("Bot notification error:", err.message);
   }
 };
 
-// @desc    Get Available Dispatches Nearby
+
+
+// @desc    Get Available Dispatches Nearby (Rider App)
 // @route   GET /api/jobs/available
 // @access  Private
 const getAvailableJobs = async (req, res, next) => {
   try {
-    await seedInitialJobs();
-
-    const jobs = await Job.find({ status: "available" }).sort({ createdAt: -1 });
+    const jobs = await Job.find({
+      $or: [{ riderId: null }, { riderId: { $exists: false } }],
+      status: { $in: ["available", "searching"] },
+    }).sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,
@@ -81,14 +50,15 @@ const getAvailableJobs = async (req, res, next) => {
   }
 };
 
-// @desc    Get Current Active Job for Rider
+
+// @desc    Get Current Active Job for Rider (Rider App)
 // @route   GET /api/jobs/active
 // @access  Private
 const getActiveJob = async (req, res, next) => {
   try {
     const activeJob = await Job.findOne({
       riderId: req.rider._id,
-      status: { $nin: ["completed", "cancelled"] },
+      status: { $nin: ["completed", "cancelled", "Failed"] },
     });
 
     res.status(200).json({
@@ -108,8 +78,7 @@ const acceptJob = async (req, res, next) => {
     let job = await Job.findById(req.params.id);
 
     if (!job) {
-      // If job ID is mock or not found by Mongo ID, find by orderNumber or first available
-      job = await Job.findOne({ status: "available" });
+      job = await Job.findOne({ status: { $in: ["available", "Active"] } });
     }
 
     if (!job) {
@@ -118,9 +87,14 @@ const acceptJob = async (req, res, next) => {
     }
 
     job.riderId = req.rider._id;
+    job.riderName = req.rider.personalDetails?.fullName || req.rider.phone || "Assigned Rider";
+    job.riderPhone = req.rider.phone || "";
     job.status = "heading_to_pickup";
     job.acceptedAt = new Date();
     await job.save();
+
+    // Notify WhatsApp bot that rider has been assigned!
+    notifyBotStatus(job, "heading_to_pickup");
 
     res.status(200).json({
       success: true,
@@ -154,7 +128,6 @@ const updateJobStatus = async (req, res, next) => {
     if (status === "completed") {
       job.completedAt = new Date();
 
-      // Create transaction log
       const now = new Date();
       const timeStr = `Today, ${now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 
@@ -168,7 +141,6 @@ const updateJobStatus = async (req, res, next) => {
         formattedTime: timeStr,
       });
 
-      // Update rider total earnings and stats
       const rider = await Rider.findById(req.rider._id);
       if (rider) {
         rider.completedJobsCount = (rider.completedJobsCount || 0) + 1;
@@ -178,6 +150,9 @@ const updateJobStatus = async (req, res, next) => {
     }
 
     await job.save();
+
+    // Notify WhatsApp bot of status update!
+    notifyBotStatus(job, status, req.body.reason);
 
     res.status(200).json({
       success: true,
@@ -251,7 +226,7 @@ const reportJobIssue = async (req, res, next) => {
   }
 };
 
-// @desc    Get Completed Job History
+// @desc    Get Completed Job History (Rider App)
 // @route   GET /api/jobs/history
 // @access  Private
 const getJobHistory = async (req, res, next) => {
@@ -271,6 +246,183 @@ const getJobHistory = async (req, res, next) => {
   }
 };
 
+// ── Admin Web Dashboard Endpoints ─────────────────────────────────────────────
+
+// @desc    Get All Deliveries for Web Dashboard (Deliveries.jsx)
+// @route   GET /api/jobs/all
+// @access  Public
+const getAllJobsAdmin = async (req, res, next) => {
+  try {
+    const { status, search } = req.query;
+    let query = {};
+
+    if (search) {
+      query.$or = [
+        { orderNumber: { $regex: search, $options: "i" } },
+        { "customer.name": { $regex: search, $options: "i" } },
+        { "vendor.name": { $regex: search, $options: "i" } },
+        { riderName: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const rawJobs = await Job.find(query).sort({ createdAt: -1 });
+
+    const deliveries = rawJobs.map((j) => {
+      let webStatus = "Active";
+      if (j.status === "completed") webStatus = "Completed";
+      else if (j.status === "issue" || j.status === "cancelled" || j.status === "Failed") webStatus = "Failed";
+      else if (j.status === "Active" || j.status === "Completed" || j.status === "Failed") webStatus = j.status;
+
+      return {
+        id: j.orderNumber || j.trackingCode || `#DEL-${j._id.toString().slice(-4)}`,
+        customer: j.customer?.name || "WhatsApp Customer",
+        phone: j.customer?.phone || "",
+        vendor: j.vendor?.name || "WhatsApp Vendor",
+        rider: j.riderName || (j.status === "available" ? "Searching for Rider..." : "Unassigned Rider"),
+        vehicle: "Delivery Motorcycle",
+        amount: j.amountFormatted || `₦${(j.deliveryFee || 1500).toLocaleString()}`,
+        status: webStatus,
+        date: j.createdAt ? new Date(j.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "",
+        pickupAddress: j.vendor?.address || "Kaduna",
+        dropoffAddress: j.customer?.address || "Kaduna",
+      };
+    });
+
+    // Apply status filter if provided
+    const filteredDeliveries = status && status !== "All"
+      ? deliveries.filter((d) => d.status === status)
+      : deliveries;
+
+    res.status(200).json({
+      success: true,
+      count: filteredDeliveries.length,
+      deliveries: filteredDeliveries,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Create new Job / Delivery Order (from Bot Webhook or API)
+// @route   POST /api/jobs/create or POST /api/jobs
+// @access  Public
+const createJob = async (req, res, next) => {
+  try {
+    const {
+      orderNumber,
+      vendorName,
+      vendorAddress,
+      vendorPhone,
+      customerName,
+      customerAddress,
+      customerPhone,
+      itemsDescription,
+      category,
+      deliveryFee,
+      codAmount,
+      amountFormatted,
+      status,
+      trackingCode,
+    } = req.body;
+
+    const generatedOrderNo = orderNumber || trackingCode || `#DEL-${Math.floor(1000 + Math.random() * 9000)}`;
+
+    const newJob = await Job.create({
+      orderNumber: generatedOrderNo,
+      trackingCode: trackingCode || generatedOrderNo.replace('#', ''),
+      vendorPhone: vendorPhone || "",
+      vendor: {
+        name: vendorName || "WhatsApp Vendor",
+        address: vendorAddress || "Kaduna",
+        itemsDescription: itemsDescription || category || "General Items",
+      },
+
+      customer: {
+        name: customerName || "Customer",
+        address: customerAddress || "Kaduna",
+        phone: customerPhone || vendorPhone || "",
+      },
+      category: category || "General",
+      deliveryFee: deliveryFee || 1500,
+      codAmount: codAmount || 0,
+      amountFormatted: amountFormatted || `₦${((codAmount || 0) + (deliveryFee || 1500)).toLocaleString()}`,
+      status: status || "available",
+    });
+
+
+    res.status(201).json({
+      success: true,
+      message: "Delivery job created successfully",
+      job: newJob,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Reset all Rider delivery dates to current timestamp
+// @route   POST /api/jobs/reset-dates
+// @access  Public
+const resetJobDates = async (req, res, next) => {
+  try {
+    const now = new Date();
+    await Job.updateMany({}, { $set: { createdAt: now, updatedAt: now } });
+    const Rider = require("../models/Rider");
+    await Rider.updateMany({}, { $set: { updatedAt: now } });
+
+    res.status(200).json({
+      success: true,
+      message: "All rider delivery dates have been reset to 100% current accurate timestamps",
+      timestamp: now,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Update Delivery Job from Admin Web Dashboard
+// @route   PUT /api/jobs/:id/admin
+// @access  Public
+const updateJobAdmin = async (req, res, next) => {
+  try {
+    const { status, riderName, customer, vendor } = req.body;
+    const job = await Job.findById(req.params.id);
+    if (!job) {
+      res.status(404);
+      throw new Error("Job not found");
+    }
+
+    if (status) job.status = status;
+    if (riderName) job.riderName = riderName;
+    if (customer?.name) job.customer.name = customer.name;
+    if (customer?.phone) job.customer.phone = customer.phone;
+    if (customer?.address) job.customer.address = customer.address;
+    if (vendor?.name) job.vendor.name = vendor.name;
+    if (vendor?.address) job.vendor.address = vendor.address;
+
+    await job.save();
+    res.status(200).json({ success: true, message: "Job updated", job });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Permanently delete Delivery Job from database
+// @route   DELETE /api/jobs/:id
+// @access  Public
+const deleteJobAdmin = async (req, res, next) => {
+  try {
+    const job = await Job.findByIdAndDelete(req.params.id);
+    if (!job) {
+      res.status(404);
+      throw new Error("Job not found");
+    }
+    res.status(200).json({ success: true, message: "Delivery permanently deleted from database" });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAvailableJobs,
   getActiveJob,
@@ -279,4 +431,10 @@ module.exports = {
   submitProofOfDelivery,
   reportJobIssue,
   getJobHistory,
+  getAllJobsAdmin,
+  createJob,
+  updateJobAdmin,
+  deleteJobAdmin,
+  resetJobDates,
 };
+
