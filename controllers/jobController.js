@@ -2,33 +2,87 @@ const Job = require("../models/Job");
 const Rider = require("../models/Rider");
 const Transaction = require("../models/Transaction");
 
-// Use Render-hosted bot URL in production, localhost in dev
-const BOT_URL = process.env.BOT_URL || "http://localhost:3000";
+const http = require("http");
+const https = require("https");
+
+// Use Render-hosted bot URL in production, 127.0.0.1 in dev
+const BOT_URL = process.env.BOT_URL || "https://aika-bot.onrender.com";
+
+const sendBotNotification = (urlStr, payload) => {
+  return new Promise((resolve, reject) => {
+    try {
+      const url = new URL(urlStr);
+      const postData = JSON.stringify(payload);
+      const transport = url.protocol === "https:" ? https : http;
+      const defaultPort = url.protocol === "https:" ? 443 : 80;
+
+      const req = transport.request({
+        hostname: url.hostname,
+        port: url.port || defaultPort,
+        path: url.pathname + url.search,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(postData),
+        },
+        timeout: 10000,
+      }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => {
+          try { resolve(JSON.parse(body)); } catch (e) { resolve({ raw: body }); }
+        });
+      });
+
+      req.on("error", (err) => reject(err));
+      req.on("timeout", () => {
+        req.destroy();
+        reject(new Error("Connection timeout to bot server"));
+      });
+
+      req.write(postData);
+      req.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+};
 
 const notifyBotStatus = async (job, status, reason = "") => {
   try {
-    const vendorPhone = job.vendorPhone || job.customer?.phone || "";
-    if (vendorPhone) {
-      await fetch(`${BOT_URL}/bot/notify-status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          orderNumber: job.orderNumber,
-          status: status || job.status,
-          riderName: job.riderName || "Assigned Rider",
-          riderPhone: job.riderPhone || "",
-          vendorPhone: vendorPhone,
-          reason: reason || job.issueReason || "",
-        }),
-      });
-      console.log(`Notified bot of status "${status}" for job "${job.orderNumber}"`);
+    let vendorPhone = job.vendorPhone || job.vendor?.phone || job.customer?.phone || "";
+    if (!vendorPhone && job.vendor?.name) {
+      try {
+        const Vendor = require("../models/Vendor");
+        const vDoc = await Vendor.findOne({ name: job.vendor.name }).lean();
+        if (vDoc && vDoc.phone) vendorPhone = vDoc.phone;
+      } catch (e) { /* ignore */ }
+    }
+
+    if (!vendorPhone) {
+      vendorPhone = "08000000000";
+    }
+
+    const payload = {
+      orderNumber: job.orderNumber || job.trackingCode,
+      status: status || job.status,
+      riderName: job.riderName || "Assigned Rider",
+      riderPhone: job.riderPhone || "",
+      vendorPhone: vendorPhone,
+      reason: reason || job.issueReason || "",
+    };
+
+    console.log(`[Bot Notify] Sending status "${status}" for order "${job.orderNumber || job.trackingCode}" to vendor phone ${vendorPhone}...`);
+    try {
+      const data = await sendBotNotification(`${BOT_URL}/bot/notify-status`, payload);
+      console.log(`[Bot Notify Success] Response for "${job.orderNumber || job.trackingCode}":`, data);
+    } catch (httpErr) {
+      console.warn(`[Bot Notify Note] Bot server on port 3000 is not reachable (${httpErr.message}). Start aika-bot to dispatch live WhatsApp alerts.`);
     }
   } catch (err) {
     console.warn("Bot notification error:", err.message);
   }
 };
-
-
 
 // @desc    Get Available Dispatches Nearby (Rider App)
 // @route   GET /api/jobs/available
@@ -75,10 +129,20 @@ const getActiveJob = async (req, res, next) => {
 // @access  Private
 const acceptJob = async (req, res, next) => {
   try {
-    let job = await Job.findById(req.params.id);
+    const mongoose = require("mongoose");
+    const idOrCode = req.params.id;
+    let job = null;
 
+    if (mongoose.Types.ObjectId.isValid(idOrCode)) {
+      job = await Job.findById(idOrCode);
+    }
     if (!job) {
-      job = await Job.findOne({ status: { $in: ["available", "Active"] } });
+      job = await Job.findOne({
+        $or: [{ orderNumber: idOrCode }, { trackingCode: idOrCode }]
+      });
+    }
+    if (!job) {
+      job = await Job.findOne({ status: { $in: ["available", "searching", "Active"] } });
     }
 
     if (!job) {
@@ -86,15 +150,31 @@ const acceptJob = async (req, res, next) => {
       throw new Error("Job not found or no longer available");
     }
 
+    const riderName = req.rider?.personalDetails?.fullName || req.rider?.name || req.rider?.phone || "Assigned Rider";
+    const riderPhone = req.rider?.phone || req.rider?.personalDetails?.phone || "";
+
+    // Resolve vendor phone if missing
+    if (!job.vendorPhone) {
+      if (job.vendor?.phone) job.vendorPhone = job.vendor.phone;
+      else if (job.customer?.phone) job.vendorPhone = job.customer.phone;
+      else if (job.vendor?.name) {
+        try {
+          const Vendor = require("../models/Vendor");
+          const vDoc = await Vendor.findOne({ name: job.vendor.name }).lean();
+          if (vDoc && vDoc.phone) job.vendorPhone = vDoc.phone;
+        } catch (e) { /* ignore */ }
+      }
+    }
+
     job.riderId = req.rider._id;
-    job.riderName = req.rider.personalDetails?.fullName || req.rider.phone || "Assigned Rider";
-    job.riderPhone = req.rider.phone || "";
+    job.riderName = riderName;
+    job.riderPhone = riderPhone;
     job.status = "heading_to_pickup";
     job.acceptedAt = new Date();
     await job.save();
 
     // Notify WhatsApp bot that rider has been assigned!
-    notifyBotStatus(job, "heading_to_pickup");
+    await notifyBotStatus(job, "heading_to_pickup");
 
     res.status(200).json({
       success: true,
@@ -152,7 +232,7 @@ const updateJobStatus = async (req, res, next) => {
     await job.save();
 
     // Notify WhatsApp bot of status update!
-    notifyBotStatus(job, status, req.body.reason);
+    await notifyBotStatus(job, status, req.body.reason);
 
     res.status(200).json({
       success: true,
@@ -273,16 +353,28 @@ const getAllJobsAdmin = async (req, res, next) => {
       else if (j.status === "issue" || j.status === "cancelled" || j.status === "Failed") webStatus = "Failed";
       else if (j.status === "Active" || j.status === "Completed" || j.status === "Failed") webStatus = j.status;
 
+      const rawId = j._id ? j._id.toString() : Math.floor(1000 + Math.random() * 9000).toString();
+      const fee = Number(j.deliveryFee) || 1500;
+
       return {
-        id: j.orderNumber || j.trackingCode || `#DEL-${j._id.toString().slice(-4)}`,
+        _id: rawId,
+        id: j.orderNumber || j.trackingCode || `#DEL-${rawId.slice(-4)}`,
+        orderNumber: j.orderNumber || j.trackingCode || `#DEL-${rawId.slice(-4)}`,
+        trackingCode: j.trackingCode || j.orderNumber || "",
         customer: j.customer?.name || "WhatsApp Customer",
-        phone: j.customer?.phone || "",
+        customerName: j.customer?.name || "WhatsApp Customer",
+        phone: j.customer?.phone || j.vendorPhone || "",
+        customerPhone: j.customer?.phone || j.vendorPhone || "",
         vendor: j.vendor?.name || "WhatsApp Vendor",
+        vendorName: j.vendor?.name || "WhatsApp Vendor",
         rider: j.riderName || (j.status === "available" ? "Searching for Rider..." : "Unassigned Rider"),
+        riderName: j.riderName || (j.status === "available" ? "Searching for Rider..." : "Unassigned Rider"),
         vehicle: "Delivery Motorcycle",
-        amount: j.amountFormatted || `₦${(j.deliveryFee || 1500).toLocaleString()}`,
+        deliveryFee: fee,
+        amount: j.amountFormatted || `₦${fee.toLocaleString()}`,
         status: webStatus,
-        date: j.createdAt ? new Date(j.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "",
+        rawStatus: j.status || "available",
+        date: j.createdAt ? new Date(j.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "Today",
         pickupAddress: j.vendor?.address || "Kaduna",
         dropoffAddress: j.customer?.address || "Kaduna",
       };
@@ -423,6 +515,88 @@ const deleteJobAdmin = async (req, res, next) => {
   }
 };
 
+// @desc    Update Rider GPS Location
+// @route   PUT /api/jobs/:id/location
+// @access  Private (Rider)
+const updateJobLocation = async (req, res, next) => {
+  try {
+    const { latitude, longitude } = req.body;
+    if (latitude === undefined || longitude === undefined) {
+      res.status(400);
+      throw new Error("Latitude and longitude are required");
+    }
+
+    const mongoose = require("mongoose");
+    const idOrCode = req.params.id;
+    let job = null;
+
+    if (mongoose.Types.ObjectId.isValid(idOrCode)) {
+      job = await Job.findById(idOrCode);
+    }
+    if (!job) {
+      job = await Job.findOne({
+        $or: [{ orderNumber: idOrCode }, { trackingCode: idOrCode }]
+      });
+    }
+    if (!job) {
+      job = await Job.findOne({ riderId: req.rider._id, status: { $nin: ["completed", "cancelled", "Failed"] } });
+    }
+
+    if (job) {
+      job.riderLat = Number(latitude);
+      job.riderLng = Number(longitude);
+      job.riderUpdatedAt = new Date();
+      await job.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Rider location updated",
+      riderLat: Number(latitude),
+      riderLng: Number(longitude),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get Public Order Live Tracking Data
+// @route   GET /api/jobs/track/:trackingCode
+// @access  Public
+const getPublicTrackJob = async (req, res, next) => {
+  try {
+    const code = req.params.trackingCode;
+    const job = await Job.findOne({
+      $or: [{ trackingCode: code }, { orderNumber: code }]
+    }).lean();
+
+    if (!job) {
+      return res.status(404).json({ success: false, message: "Tracking reference not found" });
+    }
+
+    res.status(200).json({
+      success: true,
+      job: {
+        orderNumber: job.orderNumber || job.trackingCode,
+        trackingCode: job.trackingCode || job.orderNumber,
+        status: job.status,
+        vendor: job.vendor,
+        customer: job.customer,
+        riderName: job.riderName || "Assigned Rider",
+        riderPhone: job.riderPhone || "",
+        riderLat: job.riderLat || null,
+        riderLng: job.riderLng || null,
+        riderUpdatedAt: job.riderUpdatedAt || null,
+        deliveryFee: job.deliveryFee,
+        codAmount: job.codAmount,
+        updatedAt: job.updatedAt,
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAvailableJobs,
   getActiveJob,
@@ -436,5 +610,7 @@ module.exports = {
   updateJobAdmin,
   deleteJobAdmin,
   resetJobDates,
+  updateJobLocation,
+  getPublicTrackJob,
 };
 

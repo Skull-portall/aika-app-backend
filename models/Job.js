@@ -31,28 +31,28 @@ const JobSchema = new mongoose.Schema(
       default: null,
     },
     vendor: {
-      name: { type: String, required: true, default: "Hajiya's Kitchen" },
-      address: { type: String, required: true, default: "Unguwan Rimi, Kaduna" },
-      itemsDescription: { type: String, default: "1x Large Family Platter + 2 Drinks" },
+      name: { type: String, required: true, default: "Vendor" },
+      address: { type: String, required: true, default: "Kaduna" },
+      itemsDescription: { type: String, default: "Package Delivery" },
       fragile: { type: Boolean, default: true },
     },
     customer: {
-      name: { type: String, required: true, default: "Fatima Yusuf" },
-      address: { type: String, required: true, default: "No 12, Gwamma Road, Barnawa, Kaduna" },
-      phone: { type: String, default: "+2348031234567" },
+      name: { type: String, required: true, default: "Customer" },
+      address: { type: String, required: true, default: "Kaduna" },
+      phone: { type: String, default: "" },
     },
     deliveryFee: {
       type: Number,
       required: true,
-      default: 350,
+      default: 1500,
     },
     codAmount: {
       type: Number,
-      default: 4500,
+      default: 0,
     },
     amountFormatted: {
       type: String,
-      default: "₦4,850",
+      default: "₦1,500",
     },
     status: {
       type: String,

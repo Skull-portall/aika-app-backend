@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const connectDB = require("./config/db");
 const seedDatabase = require("./config/seeder");
+const { seedAdminUser } = require("./controllers/adminController");
 const { errorHandler } = require("./middleware/errorMiddleware");
 
 // Load env variables
@@ -13,6 +14,7 @@ const initServer = async () => {
   try {
     await connectDB();
     await seedDatabase();
+    await seedAdminUser();
   } catch (err) {
     console.error("❌ DB Initialization Error:", err.message);
   }
@@ -33,6 +35,7 @@ app.get("/", (req, res) => {
 });
 
 // Mount API Route Modules
+app.use("/api/admin", require("./routes/adminRoutes"));
 app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/rider", require("./routes/riderRoutes"));
 app.use("/api/vendors", require("./routes/vendorRoutes"));
