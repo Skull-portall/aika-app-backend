@@ -1,5 +1,43 @@
 const Ticket = require("../models/Ticket");
 
+// @desc    Create a new support ticket
+// @route   POST /api/tickets
+// @access  Public
+const createTicket = async (req, res, next) => {
+  try {
+    const { user, userType, subject, category, priority, message, orderId, riderName, riderPhone } = req.body;
+
+    if (!user || !subject) {
+      res.status(400);
+      throw new Error("user and subject are required");
+    }
+
+    const ticketId = "TKT-" + Math.floor(100000 + Math.random() * 900000);
+
+    const ticket = await Ticket.create({
+      ticketId,
+      user: user || "Unknown Rider",
+      userType: userType || "Rider",
+      subject,
+      category: category || "Delivery Issue",
+      priority: priority || "Medium",
+      date: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
+      messages: message
+        ? [{
+            sender: riderName || user || "Rider",
+            role: "user",
+            text: `${message}${orderId ? `\n\nOrder Reference: ${orderId}` : ""}`,
+            timestamp: new Date(),
+          }]
+        : [],
+    });
+
+    res.status(201).json({ success: true, ticket });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // @desc    Get all support tickets
 // @route   GET /api/tickets
 // @access  Public
@@ -119,6 +157,7 @@ const deleteTicket = async (req, res, next) => {
 };
 
 module.exports = {
+  createTicket,
   getTickets,
   getTicketById,
   replyToTicket,

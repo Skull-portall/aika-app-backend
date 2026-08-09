@@ -94,10 +94,50 @@ const getAvailableJobs = async (req, res, next) => {
       status: { $in: ["available", "searching"] },
     }).sort({ createdAt: -1 });
 
+    // For each job that belongs to a batch, attach all sibling delivery stops
+    // so the rider can see every drop-off address for the order.
+    const enrichedJobs = await Promise.all(
+      jobs.map(async (job) => {
+        const jobObj = job.toObject();
+        if (jobObj.batchId) {
+          const siblings = await Job.find({ batchId: jobObj.batchId })
+            .select("orderNumber trackingCode customer vendor deliveryFee codAmount amountFormatted batchId status")
+            .lean();
+          jobObj.batchDeliveries = siblings.map((s, idx) => ({
+            stopNumber: idx + 1,
+            jobId: s._id,
+            orderNumber: s.orderNumber,
+            trackingCode: s.trackingCode,
+            customerName: s.customer?.name || "Customer",
+            customerPhone: s.customer?.phone || "",
+            dropoffAddress: s.customer?.address || "Kaduna",
+            deliveryFee: s.deliveryFee,
+            codAmount: s.codAmount || 0,
+            status: s.status,
+          }));
+        } else {
+          // Single delivery — wrap it in the same shape for UI consistency
+          jobObj.batchDeliveries = [{
+            stopNumber: 1,
+            jobId: jobObj._id,
+            orderNumber: jobObj.orderNumber,
+            trackingCode: jobObj.trackingCode,
+            customerName: jobObj.customer?.name || "Customer",
+            customerPhone: jobObj.customer?.phone || "",
+            dropoffAddress: jobObj.customer?.address || "Kaduna",
+            deliveryFee: jobObj.deliveryFee,
+            codAmount: jobObj.codAmount || 0,
+            status: jobObj.status,
+          }];
+        }
+        return jobObj;
+      })
+    );
+
     res.status(200).json({
       success: true,
-      count: jobs.length,
-      jobs,
+      count: enrichedJobs.length,
+      jobs: enrichedJobs,
     });
   } catch (error) {
     next(error);
@@ -415,6 +455,7 @@ const createJob = async (req, res, next) => {
       amountFormatted,
       status,
       trackingCode,
+      batchId,
     } = req.body;
 
     const generatedOrderNo = orderNumber || trackingCode || `#DEL-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -439,6 +480,7 @@ const createJob = async (req, res, next) => {
       codAmount: codAmount || 0,
       amountFormatted: amountFormatted || `₦${((codAmount || 0) + (deliveryFee || 1500)).toLocaleString()}`,
       status: status || "available",
+      batchId: batchId || "",
     });
 
 
@@ -597,6 +639,48 @@ const getPublicTrackJob = async (req, res, next) => {
   }
 };
 
+// @desc    Get all Jobs in a Batch
+// @route   GET /api/jobs/batch/:batchId
+// @access  Public
+const getJobsByBatch = async (req, res, next) => {
+  try {
+    const { batchId } = req.params;
+    if (!batchId) {
+      res.status(400);
+      throw new Error("batchId is required");
+    }
+
+    const jobs = await Job.find({ batchId }).sort({ createdAt: 1 }).lean();
+
+    const stops = jobs.map((j, idx) => ({
+      stopNumber: idx + 1,
+      jobId: j._id,
+      orderNumber: j.orderNumber,
+      trackingCode: j.trackingCode,
+      customerName: j.customer?.name || "Customer",
+      customerPhone: j.customer?.phone || "",
+      dropoffAddress: j.customer?.address || "Kaduna",
+      pickupAddress: j.vendor?.address || "Kaduna",
+      vendorName: j.vendor?.name || "Vendor",
+      deliveryFee: j.deliveryFee,
+      codAmount: j.codAmount || 0,
+      amountFormatted: j.amountFormatted,
+      status: j.status,
+      riderName: j.riderName || "",
+      createdAt: j.createdAt,
+    }));
+
+    res.status(200).json({
+      success: true,
+      batchId,
+      count: stops.length,
+      stops,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAvailableJobs,
   getActiveJob,
@@ -612,5 +696,6 @@ module.exports = {
   resetJobDates,
   updateJobLocation,
   getPublicTrackJob,
+  getJobsByBatch,
 };
 

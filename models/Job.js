@@ -112,6 +112,11 @@ const JobSchema = new mongoose.Schema(
     completedAt: {
       type: Date,
     },
+    batchId: {
+      type: String,
+      default: "",
+      index: true,
+    },
   },
   {
     timestamps: true,

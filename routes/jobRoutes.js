@@ -16,6 +16,7 @@ const {
   resetJobDates,
   updateJobLocation,
   getPublicTrackJob,
+  getJobsByBatch,
 } = require("../controllers/jobController");
 
 // Admin Web & Webhook & Public Endpoints
@@ -23,6 +24,7 @@ router.get("/all", getAllJobsAdmin);
 router.post("/create", createJob);
 router.post("/webhook", createJob);
 router.post("/reset-dates", resetJobDates);
+router.get("/batch/:batchId", getJobsByBatch);
 router.get("/track/:trackingCode", getPublicTrackJob);
 router.put("/:id/admin", updateJobAdmin);
 router.delete("/:id", deleteJobAdmin);
