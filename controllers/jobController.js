@@ -92,52 +92,69 @@ const getAvailableJobs = async (req, res, next) => {
     const jobs = await Job.find({
       $or: [{ riderId: null }, { riderId: { $exists: false } }],
       status: { $in: ["available", "searching"] },
-    }).sort({ createdAt: -1 });
+      declinedRiders: { $ne: req.rider._id },
+    }).sort({ createdAt: 1 }); // oldest first so batches present in creation order
 
-    // For each job that belongs to a batch, attach all sibling delivery stops
-    // so the rider can see every drop-off address for the order.
-    const enrichedJobs = await Promise.all(
-      jobs.map(async (job) => {
-        const jobObj = job.toObject();
-        if (jobObj.batchId) {
-          const siblings = await Job.find({ batchId: jobObj.batchId })
-            .select("orderNumber trackingCode customer vendor deliveryFee codAmount amountFormatted batchId status")
-            .lean();
-          jobObj.batchDeliveries = siblings.map((s, idx) => ({
-            stopNumber: idx + 1,
-            jobId: s._id,
-            orderNumber: s.orderNumber,
-            trackingCode: s.trackingCode,
-            customerName: s.customer?.name || "Customer",
-            customerPhone: s.customer?.phone || "",
-            dropoffAddress: s.customer?.address || "Kaduna",
-            deliveryFee: s.deliveryFee,
-            codAmount: s.codAmount || 0,
-            status: s.status,
-          }));
-        } else {
-          // Single delivery — wrap it in the same shape for UI consistency
-          jobObj.batchDeliveries = [{
-            stopNumber: 1,
-            jobId: jobObj._id,
-            orderNumber: jobObj.orderNumber,
-            trackingCode: jobObj.trackingCode,
-            customerName: jobObj.customer?.name || "Customer",
-            customerPhone: jobObj.customer?.phone || "",
-            dropoffAddress: jobObj.customer?.address || "Kaduna",
-            deliveryFee: jobObj.deliveryFee,
-            codAmount: jobObj.codAmount || 0,
-            status: jobObj.status,
-          }];
+    // ── Deduplicate batch jobs ─────────────────────────────────────────────
+    // For jobs sharing a batchId, only include ONE representative (the first/oldest).
+    // That representative carries ALL sibling stops in its batchDeliveries array.
+    // Non-batch jobs (empty batchId) are included as-is.
+    const seenBatchIds = new Set();
+    const deduplicatedJobs = [];
+    for (const job of jobs) {
+      const jobObj = job.toObject();
+      if (jobObj.batchId) {
+        if (seenBatchIds.has(jobObj.batchId)) {
+          // Already have a representative for this batch — skip
+          continue;
         }
-        return jobObj;
-      })
-    );
+        seenBatchIds.add(jobObj.batchId);
+
+        // Fetch all sibling stops for this batch (any status — so rider sees full picture)
+        const siblings = await Job.find({ batchId: jobObj.batchId })
+          .select("_id orderNumber trackingCode customer vendor deliveryFee codAmount amountFormatted batchId status")
+          .sort({ createdAt: 1 })
+          .lean();
+
+        jobObj.batchDeliveries = siblings.map((s, idx) => ({
+          stopNumber: idx + 1,
+          jobId: s._id,
+          orderNumber: s.orderNumber,
+          trackingCode: s.trackingCode,
+          customerName: s.customer?.name || "Customer",
+          customerPhone: s.customer?.phone || "",
+          dropoffAddress: s.customer?.address || "Kaduna",
+          deliveryFee: s.deliveryFee,
+          codAmount: s.codAmount || 0,
+          status: s.status,
+        }));
+
+        deduplicatedJobs.push(jobObj);
+      } else {
+        // Single delivery — wrap it in the same shape for UI consistency
+        jobObj.batchDeliveries = [{
+          stopNumber: 1,
+          jobId: jobObj._id,
+          orderNumber: jobObj.orderNumber,
+          trackingCode: jobObj.trackingCode,
+          customerName: jobObj.customer?.name || "Customer",
+          customerPhone: jobObj.customer?.phone || "",
+          dropoffAddress: jobObj.customer?.address || "Kaduna",
+          deliveryFee: jobObj.deliveryFee,
+          codAmount: jobObj.codAmount || 0,
+          status: jobObj.status,
+        }];
+        deduplicatedJobs.push(jobObj);
+      }
+    }
+
+    // Return newest-first so the latest order surfaces at top
+    deduplicatedJobs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     res.status(200).json({
       success: true,
-      count: enrichedJobs.length,
-      jobs: enrichedJobs,
+      count: deduplicatedJobs.length,
+      jobs: deduplicatedJobs,
     });
   } catch (error) {
     next(error);
@@ -164,7 +181,7 @@ const getActiveJob = async (req, res, next) => {
   }
 };
 
-// @desc    Accept a Job Dispatch
+// @desc    Accept a Job Dispatch (handles single & batch)
 // @route   POST /api/jobs/:id/accept
 // @access  Private
 const acceptJob = async (req, res, next) => {
@@ -178,11 +195,8 @@ const acceptJob = async (req, res, next) => {
     }
     if (!job) {
       job = await Job.findOne({
-        $or: [{ orderNumber: idOrCode }, { trackingCode: idOrCode }]
+        $or: [{ orderNumber: idOrCode }, { trackingCode: idOrCode }, { batchId: idOrCode }]
       });
-    }
-    if (!job) {
-      job = await Job.findOne({ status: { $in: ["available", "searching", "Active"] } });
     }
 
     if (!job) {
@@ -190,8 +204,15 @@ const acceptJob = async (req, res, next) => {
       throw new Error("Job not found or no longer available");
     }
 
+    if (job.status === "cancelled" || job.status === "Failed") {
+      res.status(400);
+      throw new Error("This delivery order has been cancelled by the vendor");
+    }
+
     const riderName = req.rider?.personalDetails?.fullName || req.rider?.name || req.rider?.phone || "Assigned Rider";
     const riderPhone = req.rider?.phone || req.rider?.personalDetails?.phone || "";
+    const riderId = req.rider._id;
+    const acceptedAt = new Date();
 
     // Resolve vendor phone if missing
     if (!job.vendorPhone) {
@@ -206,20 +227,48 @@ const acceptJob = async (req, res, next) => {
       }
     }
 
-    job.riderId = req.rider._id;
+    // ── Accept the representative job ────────────────────────────────────────
+    job.riderId = riderId;
     job.riderName = riderName;
     job.riderPhone = riderPhone;
     job.status = "heading_to_pickup";
-    job.acceptedAt = new Date();
+    job.acceptedAt = acceptedAt;
     await job.save();
 
-    // Notify WhatsApp bot that rider has been assigned!
+    let acceptedSiblings = [];
+
+    // ── If this is a batch job, accept ALL sibling jobs together ──────────────
+    if (job.batchId) {
+      const siblings = await Job.find({
+        batchId: job.batchId,
+        _id: { $ne: job._id }, // exclude the representative we already updated
+        status: { $in: ["available", "searching", "Active"] },
+      });
+
+      for (const sibling of siblings) {
+        sibling.riderId = riderId;
+        sibling.riderName = riderName;
+        sibling.riderPhone = riderPhone;
+        sibling.status = "heading_to_pickup";
+        sibling.acceptedAt = acceptedAt;
+        await sibling.save();
+        acceptedSiblings.push(sibling);
+      }
+
+      console.log(`[Batch Accept] Accepted ${1 + acceptedSiblings.length} jobs for batchId "${job.batchId}" → rider ${riderName}`);
+    }
+
+    // Notify WhatsApp bot once (for the representative / first job)
     await notifyBotStatus(job, "heading_to_pickup");
 
     res.status(200).json({
       success: true,
-      message: "Job accepted successfully",
+      message: job.batchId
+        ? `Batch accepted: ${1 + acceptedSiblings.length} jobs assigned to ${riderName}`
+        : "Job accepted successfully",
       job,
+      batchAccepted: job.batchId ? true : false,
+      batchCount: 1 + acceptedSiblings.length,
     });
   } catch (error) {
     next(error);
@@ -354,12 +403,74 @@ const getJobHistory = async (req, res, next) => {
     const jobs = await Job.find({
       riderId: req.rider._id,
       status: "completed",
-    }).sort({ updatedAt: -1 });
+    }).sort({ completedAt: -1, updatedAt: -1 });
+
+    // ── Deduplicate batch jobs ────────────────────────────────────────────────
+    // For jobs sharing a batchId, return ONE grouped entry with all stops
+    // attached. Each stop carries its own completedAt and proofPhotoUrl.
+    const seenBatchIds = new Set();
+    const history = [];
+
+    for (const job of jobs) {
+      const jobObj = job.toObject();
+
+      if (jobObj.batchId) {
+        if (seenBatchIds.has(jobObj.batchId)) continue; // already processed
+        seenBatchIds.add(jobObj.batchId);
+
+        // Fetch ALL stops in this batch (completed or not, for complete picture)
+        const siblings = await Job.find({ batchId: jobObj.batchId, riderId: req.rider._id })
+          .sort({ createdAt: 1 })
+          .lean();
+
+        jobObj.batchDeliveries = siblings.map((s, idx) => ({
+          stopNumber: idx + 1,
+          jobId: s._id,
+          orderNumber: s.orderNumber,
+          trackingCode: s.trackingCode,
+          customerName: s.customer?.name || "Customer",
+          customerPhone: s.customer?.phone || "",
+          dropoffAddress: s.customer?.address || "Kaduna",
+          deliveryFee: s.deliveryFee,
+          codAmount: s.codAmount || 0,
+          status: s.status,
+          completedAt: s.completedAt || s.updatedAt || null,
+          proofPhotoUrl: s.proofPhotoUrl || "",
+        }));
+
+        // Use the earliest completedAt as the "batch date" for the card
+        const batchDate = siblings
+          .filter(s => s.completedAt)
+          .sort((a, b) => new Date(a.completedAt) - new Date(b.completedAt))[0]?.completedAt
+          || jobObj.completedAt || jobObj.updatedAt;
+
+        jobObj.batchDate = batchDate;
+        history.push(jobObj);
+      } else {
+        // Single delivery — wrap stop for UI consistency
+        jobObj.batchDeliveries = [{
+          stopNumber: 1,
+          jobId: jobObj._id,
+          orderNumber: jobObj.orderNumber,
+          trackingCode: jobObj.trackingCode,
+          customerName: jobObj.customer?.name || "Customer",
+          customerPhone: jobObj.customer?.phone || "",
+          dropoffAddress: jobObj.customer?.address || "Kaduna",
+          deliveryFee: jobObj.deliveryFee,
+          codAmount: jobObj.codAmount || 0,
+          status: jobObj.status,
+          completedAt: jobObj.completedAt || jobObj.updatedAt || null,
+          proofPhotoUrl: jobObj.proofPhotoUrl || "",
+        }];
+        jobObj.batchDate = jobObj.completedAt || jobObj.updatedAt;
+        history.push(jobObj);
+      }
+    }
 
     res.status(200).json({
       success: true,
-      count: jobs.length,
-      history: jobs,
+      count: history.length,
+      history,
     });
   } catch (error) {
     next(error);
@@ -417,6 +528,7 @@ const getAllJobsAdmin = async (req, res, next) => {
         date: j.createdAt ? new Date(j.createdAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "Today",
         pickupAddress: j.vendor?.address || "Kaduna",
         dropoffAddress: j.customer?.address || "Kaduna",
+        batchId: j.batchId || "",
       };
     });
 
@@ -460,6 +572,44 @@ const createJob = async (req, res, next) => {
 
     const generatedOrderNo = orderNumber || trackingCode || `#DEL-${Math.floor(1000 + Math.random() * 9000)}`;
 
+    let finalBatchId = batchId || "";
+
+    // ── Robust Auto-Batching for Vendor ────────────────────────────────────
+    // Match unassigned jobs from the same vendor using phone digits or business name.
+    // Group all unassigned jobs from this vendor into the SAME batchId.
+    const rawPhone = String(vendorPhone || "").replace(/\D/g, "");
+    const last10Digits = rawPhone.length >= 10 ? rawPhone.slice(-10) : rawPhone;
+    const vName = (vendorName || "").trim();
+
+    const vendorQueryConditions = [];
+    if (last10Digits.length >= 7) {
+      vendorQueryConditions.push({ vendorPhone: { $regex: last10Digits } });
+      vendorQueryConditions.push({ "customer.phone": { $regex: last10Digits } });
+    }
+    if (vName && vName !== "WhatsApp Vendor") {
+      vendorQueryConditions.push({ "vendor.name": { $regex: vName, $options: "i" } });
+    }
+
+    if (vendorQueryConditions.length > 0) {
+      const existingVendorJobs = await Job.find({
+        $or: vendorQueryConditions,
+        $or: [{ riderId: null }, { riderId: { $exists: false } }],
+        status: { $in: ["available", "searching"] },
+      }).sort({ createdAt: -1 });
+
+      if (existingVendorJobs.length > 0) {
+        // Reuse existing batchId or generate a new one
+        const existingBatchId = existingVendorJobs.find(j => j.batchId)?.batchId;
+        finalBatchId = existingBatchId || ("BATCH-" + Math.floor(100000 + Math.random() * 900000));
+
+        // Update ALL existing unassigned jobs for this vendor to share finalBatchId
+        await Job.updateMany(
+          { _id: { $in: existingVendorJobs.map(j => j._id) } },
+          { $set: { batchId: finalBatchId } }
+        );
+      }
+    }
+
     const newJob = await Job.create({
       orderNumber: generatedOrderNo,
       trackingCode: trackingCode || generatedOrderNo.replace('#', ''),
@@ -480,14 +630,14 @@ const createJob = async (req, res, next) => {
       codAmount: codAmount || 0,
       amountFormatted: amountFormatted || `₦${((codAmount || 0) + (deliveryFee || 1500)).toLocaleString()}`,
       status: status || "available",
-      batchId: batchId || "",
+      batchId: finalBatchId,
     });
-
 
     res.status(201).json({
       success: true,
       message: "Delivery job created successfully",
       job: newJob,
+      batchId: finalBatchId,
     });
   } catch (error) {
     next(error);
@@ -681,10 +831,58 @@ const getJobsByBatch = async (req, res, next) => {
   }
 };
 
+// @desc    Decline a Job Dispatch (prevents job from popping up again for this rider)
+// @route   POST /api/jobs/:id/decline
+// @access  Private
+const declineJob = async (req, res, next) => {
+  try {
+    const mongoose = require("mongoose");
+    const idOrCode = req.params.id;
+    let job = null;
+
+    if (mongoose.Types.ObjectId.isValid(idOrCode)) {
+      job = await Job.findById(idOrCode);
+    }
+    if (!job) {
+      job = await Job.findOne({
+        $or: [{ orderNumber: idOrCode }, { trackingCode: idOrCode }]
+      });
+    }
+
+    if (!job) {
+      res.status(404);
+      throw new Error("Job not found");
+    }
+
+    const riderId = req.rider._id;
+
+    // If job has a batchId, record decline on ALL sibling jobs in the batch
+    if (job.batchId) {
+      await Job.updateMany(
+        { batchId: job.batchId },
+        { $addToSet: { declinedRiders: riderId } }
+      );
+    } else {
+      if (!job.declinedRiders.includes(riderId)) {
+        job.declinedRiders.push(riderId);
+        await job.save();
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Job declined successfully",
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   getAvailableJobs,
   getActiveJob,
   acceptJob,
+  declineJob,
   updateJobStatus,
   submitProofOfDelivery,
   reportJobIssue,

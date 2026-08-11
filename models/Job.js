@@ -117,6 +117,12 @@ const JobSchema = new mongoose.Schema(
       default: "",
       index: true,
     },
+    declinedRiders: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Rider",
+      },
+    ],
   },
   {
     timestamps: true,

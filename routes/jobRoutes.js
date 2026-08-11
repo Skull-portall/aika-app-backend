@@ -5,6 +5,7 @@ const {
   getAvailableJobs,
   getActiveJob,
   acceptJob,
+  declineJob,
   updateJobStatus,
   submitProofOfDelivery,
   reportJobIssue,
@@ -33,6 +34,7 @@ router.delete("/:id", deleteJobAdmin);
 router.get("/available", protect, getAvailableJobs);
 router.get("/active", protect, getActiveJob);
 router.post("/:id/accept", protect, acceptJob);
+router.post("/:id/decline", protect, declineJob);
 router.put("/:id/status", protect, updateJobStatus);
 router.put("/:id/location", protect, updateJobLocation);
 router.post("/:id/pod", protect, submitProofOfDelivery);
