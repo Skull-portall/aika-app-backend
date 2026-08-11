@@ -95,28 +95,54 @@ const getAvailableJobs = async (req, res, next) => {
       declinedRiders: { $ne: req.rider._id },
     }).sort({ createdAt: 1 }); // oldest first so batches present in creation order
 
-    // ── Deduplicate batch jobs ─────────────────────────────────────────────
-    // For jobs sharing a batchId, only include ONE representative (the first/oldest).
-    // That representative carries ALL sibling stops in its batchDeliveries array.
-    // Non-batch jobs (empty batchId) are included as-is.
-    const seenBatchIds = new Set();
-    const deduplicatedJobs = [];
+    // ── Dynamic Vendor Batch Grouping ──────────────────────────────────────
+    // If a vendor has 1+ unassigned available jobs, group them together into a
+    // single multi-stop delivery card so the rider sees all drop-offs at once.
+
+    const getVendorKey = (j) => {
+      if (j.batchId && j.batchId.trim() !== "") {
+        return `batch:${j.batchId.trim()}`;
+      }
+      const rawPhone = String(j.vendorPhone || "").replace(/\D/g, "");
+      const last10 = rawPhone.length >= 10 ? rawPhone.slice(-10) : rawPhone;
+      if (last10.length >= 7) {
+        return `phone:${last10}`;
+      }
+      const vName = (j.vendor?.name || j.vendorName || "").trim().toLowerCase();
+      if (vName && vName !== "whatsapp vendor") {
+        return `name:${vName}`;
+      }
+      return `single:${j._id.toString()}`;
+    };
+
+    const groupedMap = new Map();
     for (const job of jobs) {
-      const jobObj = job.toObject();
-      if (jobObj.batchId) {
-        if (seenBatchIds.has(jobObj.batchId)) {
-          // Already have a representative for this batch — skip
-          continue;
+      const key = getVendorKey(job);
+      if (!groupedMap.has(key)) {
+        groupedMap.set(key, []);
+      }
+      groupedMap.get(key).push(job);
+    }
+
+    const deduplicatedJobs = [];
+
+    for (const [key, groupJobs] of groupedMap.entries()) {
+      if (groupJobs.length > 1) {
+        // Multi-stop batch! Find or generate a shared batchId
+        let sharedBatchId = groupJobs.find(j => j.batchId && j.batchId.trim() !== "")?.batchId;
+        if (!sharedBatchId) {
+          sharedBatchId = "BATCH-" + Math.floor(100000 + Math.random() * 900000);
         }
-        seenBatchIds.add(jobObj.batchId);
 
-        // Fetch all sibling stops for this batch (any status — so rider sees full picture)
-        const siblings = await Job.find({ batchId: jobObj.batchId })
-          .select("_id orderNumber trackingCode customer vendor deliveryFee codAmount amountFormatted batchId status")
-          .sort({ createdAt: 1 })
-          .lean();
+        // Update all jobs in this group to share sharedBatchId in MongoDB so acceptJob works atomically
+        const jobIdsToUpdate = groupJobs.filter(j => j.batchId !== sharedBatchId).map(j => j._id);
+        if (jobIdsToUpdate.length > 0) {
+          await Job.updateMany({ _id: { $in: jobIdsToUpdate } }, { $set: { batchId: sharedBatchId } });
+        }
 
-        jobObj.batchDeliveries = siblings.map((s, idx) => ({
+        const representative = groupJobs[0].toObject();
+        representative.batchId = sharedBatchId;
+        representative.batchDeliveries = groupJobs.map((s, idx) => ({
           stopNumber: idx + 1,
           jobId: s._id,
           orderNumber: s.orderNumber,
@@ -129,9 +155,10 @@ const getAvailableJobs = async (req, res, next) => {
           status: s.status,
         }));
 
-        deduplicatedJobs.push(jobObj);
+        deduplicatedJobs.push(representative);
       } else {
-        // Single delivery — wrap it in the same shape for UI consistency
+        // Single delivery
+        const jobObj = groupJobs[0].toObject();
         jobObj.batchDeliveries = [{
           stopNumber: 1,
           jobId: jobObj._id,
