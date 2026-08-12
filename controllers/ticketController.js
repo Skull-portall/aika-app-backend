@@ -72,26 +72,43 @@ const createTicket = async (req, res, next) => {
   try {
     const { user, userType, subject, category, priority, message, orderId, riderName } = req.body;
 
-    if (!user || !subject) {
-      res.status(400);
-      throw new Error("user and subject are required");
+    const ticketUser = String(user || riderName || "Rider").trim() || "Rider";
+    const ticketSubject = String(subject || "General Issue Report").trim();
+
+    // Standardize userType for Mongoose schema enum ["Rider", "Vendor", "Customer"]
+    let validUserType = "Rider";
+    if (userType) {
+      const ut = String(userType).toLowerCase();
+      if (ut.includes("vendor")) validUserType = "Vendor";
+      else if (ut.includes("customer")) validUserType = "Customer";
+      else validUserType = "Rider";
+    }
+
+    // Standardize priority for Mongoose schema enum ["Urgent", "High", "Medium", "Low"]
+    let validPriority = "Medium";
+    if (priority) {
+      const pr = String(priority).toLowerCase();
+      if (pr === "urgent") validPriority = "Urgent";
+      else if (pr === "high") validPriority = "High";
+      else if (pr === "low") validPriority = "Low";
+      else validPriority = "Medium";
     }
 
     const ticketId = "TKT-" + Math.floor(100000 + Math.random() * 900000);
 
     const ticket = await Ticket.create({
       ticketId,
-      user: user || "Unknown User",
-      riderName: riderName || user || "Rider",
-      userType: userType || "Rider",
-      subject,
+      user: ticketUser,
+      riderName: riderName || ticketUser,
+      userType: validUserType,
+      subject: ticketSubject,
       category: category || "Delivery Issue",
-      priority: priority || "Medium",
+      priority: validPriority,
       orderId: orderId || "",
       date: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
       messages: message
         ? [{
-            sender: riderName || user || "Rider",
+            sender: riderName || ticketUser,
             role: "user",
             text: `${message}${orderId ? `\n\nOrder Reference: ${orderId}` : ""}`,
             timestamp: new Date(),

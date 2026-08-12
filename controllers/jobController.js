@@ -429,7 +429,7 @@ const getJobHistory = async (req, res, next) => {
   try {
     const jobs = await Job.find({
       riderId: req.rider._id,
-      status: "completed",
+      status: { $in: ["completed", "Completed", "delivered", "Delivered"] },
     }).sort({ completedAt: -1, updatedAt: -1 });
 
     // ── Deduplicate batch jobs ────────────────────────────────────────────────
@@ -619,8 +619,10 @@ const createJob = async (req, res, next) => {
 
     if (vendorQueryConditions.length > 0) {
       const existingVendorJobs = await Job.find({
-        $or: vendorQueryConditions,
-        $or: [{ riderId: null }, { riderId: { $exists: false } }],
+        $and: [
+          { $or: vendorQueryConditions },
+          { $or: [{ riderId: null }, { riderId: { $exists: false } }] },
+        ],
         status: { $in: ["available", "searching"] },
       }).sort({ createdAt: -1 });
 
