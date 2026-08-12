@@ -100,10 +100,7 @@ const getAvailableJobs = async (req, res, next) => {
     // single multi-stop delivery card so the rider sees all drop-offs at once.
 
     const getVendorKey = (j) => {
-      if (j.batchId && j.batchId.trim() !== "") {
-        return `batch:${j.batchId.trim()}`;
-      }
-      const rawPhone = String(j.vendorPhone || "").replace(/\D/g, "");
+      const rawPhone = String(j.vendorPhone || j.vendor?.phone || "").replace(/\D/g, "");
       const last10 = rawPhone.length >= 10 ? rawPhone.slice(-10) : rawPhone;
       if (last10.length >= 7) {
         return `phone:${last10}`;
@@ -111,6 +108,9 @@ const getAvailableJobs = async (req, res, next) => {
       const vName = (j.vendor?.name || j.vendorName || "").trim().toLowerCase();
       if (vName && vName !== "whatsapp vendor") {
         return `name:${vName}`;
+      }
+      if (j.batchId && j.batchId.trim() !== "") {
+        return `batch:${j.batchId.trim()}`;
       }
       return `single:${j._id.toString()}`;
     };
@@ -601,16 +601,17 @@ const createJob = async (req, res, next) => {
 
     let finalBatchId = batchId || "";
 
-    // ── Robust Auto-Batching for Vendor ────────────────────────────────────
-    // Match unassigned jobs from the same vendor using phone digits or business name.
-    // Group all unassigned jobs from this vendor into the SAME batchId.
-    const rawPhone = String(vendorPhone || "").replace(/\D/g, "");
+    const effectiveVendorPhone = vendorPhone || req.body.vendor?.phone || "";
+    const effectiveVendorName = vendorName || req.body.vendor?.name || "WhatsApp Vendor";
+
+    const rawPhone = String(effectiveVendorPhone || "").replace(/\D/g, "");
     const last10Digits = rawPhone.length >= 10 ? rawPhone.slice(-10) : rawPhone;
-    const vName = (vendorName || "").trim();
+    const vName = (effectiveVendorName || "").trim();
 
     const vendorQueryConditions = [];
     if (last10Digits.length >= 7) {
       vendorQueryConditions.push({ vendorPhone: { $regex: last10Digits } });
+      vendorQueryConditions.push({ "vendor.phone": { $regex: last10Digits } });
       vendorQueryConditions.push({ "customer.phone": { $regex: last10Digits } });
     }
     if (vName && vName !== "WhatsApp Vendor") {
@@ -642,10 +643,11 @@ const createJob = async (req, res, next) => {
     const newJob = await Job.create({
       orderNumber: generatedOrderNo,
       trackingCode: trackingCode || generatedOrderNo.replace('#', ''),
-      vendorPhone: vendorPhone || "",
+      vendorPhone: effectiveVendorPhone,
       vendor: {
-        name: vendorName || "WhatsApp Vendor",
-        address: vendorAddress || "Kaduna",
+        name: effectiveVendorName,
+        address: vendorAddress || req.body.vendor?.address || "Kaduna",
+        phone: effectiveVendorPhone,
         itemsDescription: itemsDescription || category || "General Items",
       },
 
