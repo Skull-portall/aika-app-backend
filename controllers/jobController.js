@@ -126,7 +126,18 @@ const getAvailableJobs = async (req, res, next) => {
 
     const deduplicatedJobs = [];
 
-    for (const [key, groupJobs] of groupedMap.entries()) {
+    for (const [key, rawGroupJobs] of groupedMap.entries()) {
+      // Deduplicate jobs by trackingCode / orderNumber to prevent duplicate doc entries
+      const seenCodes = new Set();
+      const groupJobs = [];
+      for (const j of rawGroupJobs) {
+        const code = String(j.trackingCode || j.orderNumber || j._id.toString()).trim();
+        if (!seenCodes.has(code)) {
+          seenCodes.add(code);
+          groupJobs.push(j);
+        }
+      }
+
       if (groupJobs.length > 1) {
         // Multi-stop batch! Find or generate a shared batchId
         let sharedBatchId = groupJobs.find(j => j.batchId && j.batchId.trim() !== "")?.batchId;
@@ -640,9 +651,39 @@ const createJob = async (req, res, next) => {
       }
     }
 
+    // Deduplicate: check if job with matching trackingCode / orderNumber already exists in MongoDB
+    const tCode = trackingCode || generatedOrderNo.replace('#', '');
+    let existingJobDoc = await Job.findOne({
+      $or: [{ trackingCode: tCode }, { orderNumber: generatedOrderNo }]
+    });
+
+    if (existingJobDoc) {
+      existingJobDoc.vendorPhone = effectiveVendorPhone || existingJobDoc.vendorPhone;
+      existingJobDoc.vendor = {
+        name: effectiveVendorName || existingJobDoc.vendor?.name,
+        address: vendorAddress || req.body.vendor?.address || existingJobDoc.vendor?.address || "Kaduna",
+        phone: effectiveVendorPhone || existingJobDoc.vendor?.phone,
+        itemsDescription: itemsDescription || category || existingJobDoc.vendor?.itemsDescription || "General Items",
+      };
+      existingJobDoc.customer = {
+        name: customerName || existingJobDoc.customer?.name || "Customer",
+        address: customerAddress || existingJobDoc.customer?.address || "Kaduna",
+        phone: customerPhone || effectiveVendorPhone || existingJobDoc.customer?.phone || "",
+      };
+      if (finalBatchId) existingJobDoc.batchId = finalBatchId;
+      await existingJobDoc.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Delivery job updated successfully",
+        job: existingJobDoc,
+        batchId: existingJobDoc.batchId || finalBatchId,
+      });
+    }
+
     const newJob = await Job.create({
       orderNumber: generatedOrderNo,
-      trackingCode: trackingCode || generatedOrderNo.replace('#', ''),
+      trackingCode: tCode,
       vendorPhone: effectiveVendorPhone,
       vendor: {
         name: effectiveVendorName,
