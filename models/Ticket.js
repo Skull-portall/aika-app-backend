@@ -1,5 +1,18 @@
 const mongoose = require("mongoose");
 
+const messageSchema = new mongoose.Schema({
+  sender: String,
+  role: { type: String, enum: ["agent", "user", "system"], default: "user" },
+  text: String,
+  timestamp: { type: Date, default: Date.now },
+});
+
+const noteSchema = new mongoose.Schema({
+  text: { type: String, required: true },
+  author: { type: String, default: "Jane Admin" },
+  createdAt: { type: Date, default: Date.now },
+});
+
 const TicketSchema = new mongoose.Schema(
   {
     ticketId: {
@@ -10,6 +23,10 @@ const TicketSchema = new mongoose.Schema(
     user: {
       type: String,
       required: true,
+    },
+    riderName: {
+      type: String,
+      default: "",
     },
     userType: {
       type: String,
@@ -29,24 +46,27 @@ const TicketSchema = new mongoose.Schema(
       enum: ["Urgent", "High", "Medium", "Low"],
       default: "Medium",
     },
-
     status: {
       type: String,
       enum: ["Open", "In Progress", "Resolved", "Closed"],
       default: "Open",
     },
+    orderId: {
+      type: String,
+      default: "",
+    },
+    assignedTo: {
+      name: { type: String, default: "Unassigned" },
+      email: { type: String, default: "" },
+      avatar: { type: String, default: "/aika-logo-avatar.svg" },
+      assignedAt: { type: Date },
+    },
+    messages: [messageSchema],
+    internalNotes: [noteSchema],
     date: {
       type: String,
       default: "",
     },
-    messages: [
-      {
-        sender: String,
-        role: String, // 'agent' | 'user'
-        text: String,
-        timestamp: { type: Date, default: Date.now },
-      },
-    ],
   },
   {
     timestamps: true,

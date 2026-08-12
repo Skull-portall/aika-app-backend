@@ -43,6 +43,8 @@ app.use("/api/jobs", require("./routes/jobRoutes"));
 app.use("/api/earnings", require("./routes/earningsRoutes"));
 app.use("/api/tickets", require("./routes/ticketRoutes"));
 app.use("/api/dashboard", require("./routes/dashboardRoutes"));
+app.use("/api/admin/settings", require("./routes/adminSettingRoutes"));
+app.use("/api/upload", require("./routes/uploadRoutes"));
 
 // Global Error Handler Middleware
 app.use(errorHandler);

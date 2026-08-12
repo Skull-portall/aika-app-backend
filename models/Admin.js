@@ -1,12 +1,20 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
+const sessionSchema = new mongoose.Schema({
+  browser: { type: String, required: true },
+  location: { type: String, default: "Kaduna, Nigeria" },
+  deviceType: { type: String, default: "desktop" },
+  isCurrent: { type: Boolean, default: false },
+  lastActive: { type: Date, default: Date.now },
+});
+
 const adminSchema = new mongoose.Schema(
   {
     name: {
       type: String,
       required: true,
-      default: "Aika Admin",
+      default: "Jane Admin",
     },
     email: {
       type: String,
@@ -19,13 +27,60 @@ const adminSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    phone: {
+      type: String,
+      default: "+234 800 000 0000",
+    },
     role: {
       type: String,
-      default: "Super Admin",
+      default: "Fleet Manager",
     },
     avatar: {
       type: String,
-      default: "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?q=80&w=150&auto=format&fit=crop",
+      default: "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=150&auto=format&fit=crop&q=80",
+    },
+    twoFactorEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    notifications: {
+      emailNotifications: { type: Boolean, default: true },
+      pushNotifications: { type: Boolean, default: true },
+      dailyReports: { type: Boolean, default: true },
+    },
+    permissionsCount: {
+      type: Number,
+      default: 31,
+    },
+    modulePermissions: {
+      type: Object,
+      default: {
+        dashboard: { view: true, manage: true },
+        riders: { view: true, manage: true },
+        vendors: { view: true, manage: true },
+        deliveries: { view: true, manage: true },
+        earnings: { view: true, manage: true, export: true },
+        verification: { view: true, manage: true },
+        support: { view: true, manage: true },
+        settings: { view: false, manage: false },
+      },
+    },
+    activeSessions: [sessionSchema],
+    isYou: {
+      type: Boolean,
+      default: false,
+    },
+    color: {
+      type: String,
+      default: "#5D20D3",
+    },
+    initials: {
+      type: String,
+      default: "JA",
+    },
+    active: {
+      type: Boolean,
+      default: true,
     },
   },
   {
