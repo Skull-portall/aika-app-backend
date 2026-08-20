@@ -8,6 +8,28 @@ const generateToken = (id) => {
   });
 };
 
+// Helper to find a rider flexibly across local and international Nigerian phone formats
+const findRiderByPhone = async (phone) => {
+  if (!phone) return null;
+  const cleanPhone = String(phone).replace(/\D/g, "");
+  const last10 = cleanPhone.slice(-10);
+
+  return await Rider.findOne({
+    $or: [
+      { phone: cleanPhone },
+      { phone: `0${last10}` },
+      { phone: `234${last10}` },
+      { phone: `+234${last10}` },
+      { phone: last10 },
+      { phone: { $regex: `${last10}$`, $options: "i" } },
+      { "personalDetails.phone": cleanPhone },
+      { "personalDetails.phone": `0${last10}` },
+      { "personalDetails.phone": `+234${last10}` },
+      { "personalDetails.phone": { $regex: `${last10}$`, $options: "i" } },
+    ],
+  });
+};
+
 // @desc    Check if a phone number is already registered
 // @route   POST /api/auth/check-phone
 // @access  Public
@@ -20,11 +42,10 @@ const checkPhone = async (req, res, next) => {
       throw new Error("Please enter a phone number");
     }
 
-    const cleanPhone = phone.replace(/\D/g, "");
-    const riderExists = await Rider.findOne({ phone: cleanPhone });
+    const cleanPhone = String(phone).replace(/\D/g, "");
+    const riderExists = await findRiderByPhone(phone);
 
     // Archived accounts: block login AND new registration
-    // Only permanently deleted phones (not in DB at all) can register fresh
     if (riderExists && riderExists.status === "Archived") {
       return res.status(200).json({
         phone: cleanPhone,
@@ -35,10 +56,24 @@ const checkPhone = async (req, res, next) => {
       });
     }
 
+    const riderFullName =
+      riderExists?.personalDetails?.fullName ||
+      riderExists?.fullName ||
+      riderExists?.firstName ||
+      "";
+    const firstName = riderFullName ? riderFullName.trim().split(" ")[0] : "";
+    const profilePhotoUrl =
+      riderExists?.personalDetails?.profilePhotoUrl ||
+      riderExists?.profilePhotoUrl ||
+      "";
+
     res.status(200).json({
       phone: cleanPhone,
       registered: !!riderExists && !!riderExists.password,
       step: riderExists ? riderExists.step : "otp",
+      name: riderFullName,
+      firstName: firstName,
+      profilePhotoUrl: profilePhotoUrl,
     });
   } catch (error) {
     next(error);
@@ -57,7 +92,7 @@ const verifyOTP = async (req, res, next) => {
       throw new Error("Please provide phone and code");
     }
 
-    const cleanPhone = phone.replace(/\D/g, "");
+    const cleanPhone = String(phone).replace(/\D/g, "");
 
     // Mock OTP verification (123456 or 111111 works, or any 6 digits for testing)
     const isMockValid = code === "123456" || code === "111111" || code.length === 6;
@@ -67,11 +102,10 @@ const verifyOTP = async (req, res, next) => {
       throw new Error("Invalid OTP verification code");
     }
 
-    let rider = await Rider.findOne({ phone: cleanPhone });
+    let rider = await findRiderByPhone(phone);
     let isNew = false;
 
     // Archived accounts are completely blocked — cannot login or re-register
-    // Only permanently deleted phones (not in DB) can create a new account
     if (rider && rider.status === "Archived") {
       res.status(403);
       throw new Error("This account has been deactivated by an administrator. You cannot sign up with this number. Please contact support.");
@@ -114,8 +148,8 @@ const loginRider = async (req, res, next) => {
       throw new Error("Please enter phone and password");
     }
 
-    const cleanPhone = phone.replace(/\D/g, "");
-    const rider = await Rider.findOne({ phone: cleanPhone });
+    const cleanPhone = String(phone).replace(/\D/g, "");
+    const rider = await findRiderByPhone(phone);
 
     if (!rider || !rider.password) {
       res.status(401);
